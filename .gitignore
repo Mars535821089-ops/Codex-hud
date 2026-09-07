@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+config.local.json
+*.log
+*.pid
+*.fifo
+rollout-*.jsonl
+transcript*.jsonl

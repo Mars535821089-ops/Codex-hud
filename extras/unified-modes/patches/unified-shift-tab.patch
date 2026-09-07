@@ -1,0 +1,634 @@
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index d2ea7c5..8c3b14b 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -1658,8 +1658,21 @@ impl App {
+                     profile_selection,
+                 );
+             }
+-            AppEvent::ApplyPermissionShortcut { thread_id, selection } => {
+-                self.apply_permission_shortcut(app_server, tui, thread_id, selection).await;
++            AppEvent::ApplyPermissionShortcut {
++                thread_id,
++                selection,
++                collaboration_mode,
++                rollback_collaboration_mode,
++            } => {
++                self.apply_permission_shortcut(
++                    app_server,
++                    tui,
++                    thread_id,
++                    selection,
++                    collaboration_mode,
++                    rollback_collaboration_mode,
++                )
++                .await;
+             }
+             AppEvent::OpenWorldWritableWarningConfirmation {
+                 preset,
+diff --git a/codex-rs/tui/src/app/permission_shortcuts.rs b/codex-rs/tui/src/app/permission_shortcuts.rs
+index 4b1526d..be16e4a 100644
+--- a/codex-rs/tui/src/app/permission_shortcuts.rs
++++ b/codex-rs/tui/src/app/permission_shortcuts.rs
+@@ -2,6 +2,7 @@
+
+ use super::*;
+ use codex_app_server_protocol::ThreadSettingsUpdateParams;
++use codex_protocol::config_types::ModeKind;
+
+ impl App {
+     pub(super) async fn apply_permission_shortcut(
+@@ -10,6 +11,8 @@ impl App {
+         tui: &mut tui::Tui,
+         thread_id: ThreadId,
+         selection: PermissionProfileSelection,
++        collaboration_mode: Option<ModeKind>,
++        rollback_collaboration_mode: Option<ModeKind>,
+     ) {
+         if self.current_displayed_thread_id() != Some(thread_id)
+             || self.chat_widget.thread_id() != Some(thread_id)
+@@ -54,11 +57,19 @@ impl App {
+             self.runtime_approval_policy_override = selection.approval_policy.map(RuntimeApprovalPolicyOverride::Explicit);
+             self.runtime_permission_profile_override = Some(RuntimePermissionProfileOverride::from_config(&config));
+             self.sync_active_thread_permission_settings_to_cached_session().await;
++            if let Some(mode) = collaboration_mode {
++                self.chat_widget
++                    .set_collaboration_mode_kind_from_user_action(mode);
++            }
+             self.insert_history_cell(tui, Box::new(history_cell::new_info_event(format!("Permissions updated to {}", selection.display_label), /*hint*/ None)));
+             Ok(())
+         }.await;
+         self.chat_widget.complete_permission_shortcut(thread_id);
+         if let Err(err) = result {
++            if let Some(mode) = rollback_collaboration_mode {
++                self.chat_widget
++                    .set_collaboration_mode_kind_from_user_action(mode);
++            }
+             let error = crate::config_update::format_config_error(&err);
+             self.insert_history_cell(
+                 tui,
+diff --git a/codex-rs/tui/src/app/tests/backend_banner_fallback_tests.rs b/codex-rs/tui/src/app/tests/backend_banner_fallback_tests.rs
+index c353384..b733492 100644
+--- a/codex-rs/tui/src/app/tests/backend_banner_fallback_tests.rs
++++ b/codex-rs/tui/src/app/tests/backend_banner_fallback_tests.rs
+@@ -72,6 +72,9 @@ async fn backend_banner_fallback_updates_task_settings_and_keeps_notice() -> Res
+         let config_path = app.config.codex_home.join("config.toml");
+         let saved_config = std::fs::read(&config_path).ok();
+         while events.try_recv().is_ok() {}
++        if mode_kind == ModeKind::Plan {
++            app.chat_widget.complete_permission_shortcut(thread_id);
++        }
+         while ops.try_recv().is_ok() {}
+         requests.lock().unwrap().clear();
+         let response = fallback_response();
+@@ -159,6 +162,7 @@ async fn backend_banner_fallback_updates_task_settings_and_keeps_notice() -> Res
+             let chat = &mut app.chat_widget;
+             chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
+             assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
++            chat.complete_permission_shortcut(thread_id);
+             chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
+         }
+         app.chat_widget
+diff --git a/codex-rs/tui/src/app/tests/permission_shortcuts_tests.rs b/codex-rs/tui/src/app/tests/permission_shortcuts_tests.rs
+index a15b2a0..892ebf2 100644
+--- a/codex-rs/tui/src/app/tests/permission_shortcuts_tests.rs
++++ b/codex-rs/tui/src/app/tests/permission_shortcuts_tests.rs
+@@ -53,12 +53,21 @@ async fn permission_shortcut_rejections_leave_state_unchanged() -> Result<()> {
+             &mut tui,
+             ThreadId::new(),
+             read_only_selection(),
++            /*collaboration_mode*/ None,
++            /*rollback_collaboration_mode*/ None,
+         )
+         .await;
+         assert_eq!(app.transcript_cells.len(), transcript_len);
+         assert!(events.try_recv().is_err());
+-        app.apply_permission_shortcut(&mut app_server, &mut tui, thread_id, read_only_selection())
+-            .await;
++        app.apply_permission_shortcut(
++            &mut app_server,
++            &mut tui,
++            thread_id,
++            read_only_selection(),
++            /*collaboration_mode*/ None,
++            /*rollback_collaboration_mode*/ None,
++        )
++        .await;
+         assert_eq!(
+             RuntimePermissionProfileOverride::from_config(app.chat_widget.config_ref()),
+             original
+@@ -81,7 +90,7 @@ async fn permission_shortcut_rejections_leave_state_unchanged() -> Result<()> {
+ }
+
+ #[tokio::test]
+-async fn permission_shortcut_confirms_without_persisting() -> Result<()> {
++async fn unified_mode_shortcut_confirms_without_persisting() -> Result<()> {
+     let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
+     let mut tui = crate::tui::test_support::make_test_tui()?;
+     let codex_home = tempdir()?;
+@@ -105,8 +114,15 @@ async fn permission_shortcut_confirms_without_persisting() -> Result<()> {
+     let contents = std::fs::read_to_string(&config_path)?;
+     while events.try_recv().is_ok() {}
+
+-    app.apply_permission_shortcut(&mut app_server, &mut tui, thread_id, read_only_selection())
+-        .await;
++    app.apply_permission_shortcut(
++        &mut app_server,
++        &mut tui,
++        thread_id,
++        read_only_selection(),
++        Some(ModeKind::Plan),
++        /*rollback_collaboration_mode*/ None,
++    )
++    .await;
+
+     let cell = app.transcript_cells.last().expect("confirmed notice");
+     insta::assert_snapshot!(
+@@ -127,11 +143,18 @@ async fn permission_shortcut_confirms_without_persisting() -> Result<()> {
+         profile.clone().map(Into::into)
+     );
+     assert_eq!(profile, Some(ActivePermissionProfile::new(":read-only")));
++    assert_eq!(
++        app.chat_widget.active_collaboration_mode_kind(),
++        ModeKind::Plan
++    );
+     assert_eq!(app.config.approvals_reviewer, ApprovalsReviewer::User);
+     assert_eq!(std::fs::read_to_string(config_path)?, contents);
++    let queued_events = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+     assert!(
+-        events.try_recv().is_err(),
+-        "must not queue another update or config write"
++        queued_events
++            .iter()
++            .any(|event| matches!(event, AppEvent::SubmitThreadOp { .. })),
++        "must submit the Plan collaboration mode update"
+     );
+     app_server.shutdown().await?;
+     Ok(())
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index 1592aef..7edc5f4 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -60,6 +60,7 @@ use codex_config::types::ApprovalsReviewer;
+ use codex_features::Feature;
+ use codex_plugin::PluginCapabilitySummary;
+ use codex_protocol::config_types::CollaborationModeMask;
++use codex_protocol::config_types::ModeKind;
+ use codex_protocol::config_types::Personality;
+ use codex_protocol::models::ActivePermissionProfile;
+
+@@ -1037,6 +1038,8 @@ pub(crate) enum AppEvent {
+     ApplyPermissionShortcut {
+         thread_id: ThreadId,
+         selection: PermissionProfileSelection,
++        collaboration_mode: Option<ModeKind>,
++        rollback_collaboration_mode: Option<ModeKind>,
+     },
+
+     /// Open the Windows world-writable directories warning.
+diff --git a/codex-rs/tui/src/bottom_pane/footer.rs b/codex-rs/tui/src/bottom_pane/footer.rs
+index ab4366e..abb6397 100644
+--- a/codex-rs/tui/src/bottom_pane/footer.rs
++++ b/codex-rs/tui/src/bottom_pane/footer.rs
+@@ -90,6 +90,7 @@ pub(crate) struct FooterProps {
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub(crate) enum CollaborationModeIndicator {
+     Plan,
++    FullAccess,
+ }
+
+ #[derive(Clone, Debug, Eq, PartialEq)]
+@@ -146,6 +147,7 @@ impl CollaborationModeIndicator {
+         };
+         match self {
+             CollaborationModeIndicator::Plan => format!("Plan mode{suffix}"),
++            CollaborationModeIndicator::FullAccess => format!("Full Access{suffix}"),
+         }
+     }
+
+@@ -153,6 +155,7 @@ impl CollaborationModeIndicator {
+         let label = self.label(show_cycle_hint);
+         match self {
+             CollaborationModeIndicator::Plan => Span::from(label).magenta(),
++            CollaborationModeIndicator::FullAccess => Span::from(label).red(),
+         }
+     }
+ }
+diff --git a/codex-rs/tui/src/chatwidget/interaction.rs b/codex-rs/tui/src/chatwidget/interaction.rs
+index 015a698..bf99968 100644
+--- a/codex-rs/tui/src/chatwidget/interaction.rs
++++ b/codex-rs/tui/src/chatwidget/interaction.rs
+@@ -39,7 +39,10 @@ impl ChatWidget {
+             return;
+         }
+
+-        if self.handle_reasoning_shortcut(key_event) || self.handle_permission_shortcut(key_event) {
++        if self.handle_unified_mode_shortcut(key_event)
++            || self.handle_reasoning_shortcut(key_event)
++            || self.handle_permission_shortcut(key_event)
++        {
+             self.bottom_pane.clear_quit_shortcut_hint();
+             self.quit_shortcut_expires_at = None;
+             self.quit_shortcut_key = None;
+@@ -160,32 +163,16 @@ impl ChatWidget {
+             return;
+         }
+
+-        match key_event {
+-            KeyEvent {
+-                code: KeyCode::BackTab,
+-                kind: KeyEventKind::Press,
+-                ..
+-            } if self.collaboration_modes_enabled()
+-                && !self.bottom_pane.is_task_running()
+-                && self.bottom_pane.no_modal_or_popup_active() =>
+-            {
+-                if self.blocks_direct_input {
+-                    self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
+-                } else {
+-                    self.cycle_collaboration_mode();
+-                }
+-            }
+-            _ => {
+-                let had_modal_or_popup = !self.bottom_pane.no_modal_or_popup_active();
+-                let should_pause_active_goal =
+-                    self.bottom_pane.should_interrupt_running_task(key_event);
+-                let input_result = self.bottom_pane.handle_key_event(key_event);
+-                self.sync_backend_banner_view();
+-                if should_pause_active_goal {
+-                    self.pause_active_goal_for_interrupt();
+-                }
+-                self.handle_composer_input_result(input_result, had_modal_or_popup);
++        {
++            let had_modal_or_popup = !self.bottom_pane.no_modal_or_popup_active();
++            let should_pause_active_goal =
++                self.bottom_pane.should_interrupt_running_task(key_event);
++            let input_result = self.bottom_pane.handle_key_event(key_event);
++            self.sync_backend_banner_view();
++            if should_pause_active_goal {
++                self.pause_active_goal_for_interrupt();
+             }
++            self.handle_composer_input_result(input_result, had_modal_or_popup);
+         }
+     }
+
+diff --git a/codex-rs/tui/src/chatwidget/permission_shortcuts.rs b/codex-rs/tui/src/chatwidget/permission_shortcuts.rs
+index 499dbe4..931119e 100644
+--- a/codex-rs/tui/src/chatwidget/permission_shortcuts.rs
++++ b/codex-rs/tui/src/chatwidget/permission_shortcuts.rs
+@@ -3,6 +3,96 @@
+ use super::*;
+
+ impl ChatWidget {
++    /// Make Shift+Tab behave as one session-scoped mode switch:
++    /// Default -> Plan -> Full Access -> Default.
++    pub(super) fn handle_unified_mode_shortcut(&mut self, key_event: KeyEvent) -> bool {
++        if !matches!(
++            key_event,
++            KeyEvent {
++                code: KeyCode::BackTab,
++                kind: KeyEventKind::Press,
++                ..
++            }
++        ) {
++            return false;
++        }
++        if !self.collaboration_modes_enabled()
++            || self.bottom_pane.is_task_running()
++            || !self.bottom_pane.no_modal_or_popup_active()
++        {
++            return false;
++        }
++        if self.permission_shortcut_pending {
++            return true;
++        }
++        if self.blocks_direct_input {
++            self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
++            return true;
++        }
++        let Some(thread_id) = self.thread_id else {
++            return true;
++        };
++
++        let current_approval =
++            AskForApproval::from(self.config.permissions.approval_policy.value());
++        let current_profile = self.config.permissions.permission_profile();
++        let full_access = current_approval == AskForApproval::Never
++            && matches!(current_profile, PermissionProfile::Disabled);
++        let previous_collaboration_mode = self.active_mode_kind();
++        let (preset_id, display_label, collaboration_mode) =
++            if self.active_mode_kind() == ModeKind::Plan {
++                ("full-access", "Full Access", ModeKind::Default)
++            } else if full_access {
++                ("auto", "Default", ModeKind::Default)
++            } else {
++                ("read-only", "Plan", ModeKind::Plan)
++            };
++
++        let Some(preset) = builtin_approval_presets()
++            .into_iter()
++            .find(|preset| preset.id == preset_id)
++        else {
++            self.add_error_message(format!(
++                "Internal error: missing the '{preset_id}' permission preset."
++            ));
++            return true;
++        };
++        let approval = AskForApproval::from(preset.approval);
++        let reviewer = ApprovalsReviewer::User;
++        let requirements = self.config.config_layer_stack.requirements();
++        if let Some(reason) = self.permission_mode_disabled_reason(&preset, approval) {
++            self.add_info_message(reason, /*hint*/ None);
++            return true;
++        }
++        if let Err(err) = requirements.approvals_reviewer.can_set(&reviewer) {
++            self.add_info_message(err.to_string(), /*hint*/ None);
++            return true;
++        }
++        if requirements.auto_review_required_for_model(self.current_model()) {
++            self.add_info_message(
++                "This model requires automatic approval review, so this mode is unavailable."
++                    .to_string(),
++                /*hint*/ None,
++            );
++            return true;
++        }
++
++        self.permission_shortcut_pending = true;
++        self.set_collaboration_mode_kind_from_user_action(collaboration_mode);
++        self.app_event_tx.send(AppEvent::ApplyPermissionShortcut {
++            thread_id,
++            selection: PermissionProfileSelection {
++                profile_id: preset.active_permission_profile.id,
++                approval_policy: Some(approval),
++                approvals_reviewer: Some(reviewer),
++                display_label: display_label.to_string(),
++            },
++            collaboration_mode: Some(collaboration_mode),
++            rollback_collaboration_mode: Some(previous_collaboration_mode),
++        });
++        true
++    }
++
+     pub(super) fn handle_permission_shortcut(&mut self, key_event: KeyEvent) -> bool {
+         let forward = if self.chat_keymap.next_permission_mode.is_pressed(key_event) {
+             true
+@@ -112,6 +202,8 @@ impl ChatWidget {
+             self.app_event_tx.send(AppEvent::ApplyPermissionShortcut {
+                 thread_id,
+                 selection: selection.clone(),
++                collaboration_mode: None,
++                rollback_collaboration_mode: None,
+             });
+         } else {
+             self.add_info_message(
+diff --git a/codex-rs/tui/src/chatwidget/settings.rs b/codex-rs/tui/src/chatwidget/settings.rs
+index 74d3e7f..6c8618b 100644
+--- a/codex-rs/tui/src/chatwidget/settings.rs
++++ b/codex-rs/tui/src/chatwidget/settings.rs
+@@ -16,6 +16,7 @@ impl ChatWidget {
+             tracing::warn!(%err, "failed to set approval_policy on chat config");
+         } else {
+             self.refresh_status_surfaces();
++            self.update_collaboration_mode_indicator();
+         }
+     }
+
+@@ -28,6 +29,7 @@ impl ChatWidget {
+             .permissions
+             .set_permission_profile_from_session_snapshot(snapshot)?;
+         self.refresh_status_surfaces();
++        self.update_collaboration_mode_indicator();
+         Ok(())
+     }
+
+@@ -45,6 +47,7 @@ impl ChatWidget {
+                 ),
+             )?;
+         self.refresh_status_surfaces();
++        self.update_collaboration_mode_indicator();
+         Ok(())
+     }
+
+@@ -572,6 +575,16 @@ impl ChatWidget {
+         }
+         match self.active_mode_kind() {
+             ModeKind::Plan => Some(CollaborationModeIndicator::Plan),
++            ModeKind::Default
++                if AskForApproval::from(self.config.permissions.approval_policy.value())
++                    == AskForApproval::Never
++                    && matches!(
++                        self.config.permissions.permission_profile(),
++                        PermissionProfile::Disabled
++                    ) =>
++            {
++                Some(CollaborationModeIndicator::FullAccess)
++            }
+             ModeKind::Default => None,
+         }
+     }
+@@ -629,25 +642,20 @@ impl ChatWidget {
+         self.update_collaboration_mode_indicator();
+     }
+
+-    /// Cycle to the next collaboration mode variant (Plan -> Default -> Plan).
+-    pub(super) fn cycle_collaboration_mode(&mut self) {
+-        if !self.collaboration_modes_enabled() {
+-            return;
+-        }
+-
+-        if let Some(next_mask) = collaboration_modes::next_mask(
+-            self.model_catalog.as_ref(),
+-            self.active_collaboration_mask.as_ref(),
+-        ) {
+-            self.set_collaboration_mask_from_user_action(next_mask);
+-        }
+-    }
+-
+     pub(crate) fn set_collaboration_mask_from_user_action(&mut self, mask: CollaborationModeMask) {
+         self.set_collaboration_mask(mask);
+         self.submit_collaboration_mode_settings_update();
+     }
+
++    pub(crate) fn set_collaboration_mode_kind_from_user_action(&mut self, kind: ModeKind) {
++        if self.active_mode_kind() == kind {
++            return;
++        }
++        if let Some(mask) = collaboration_modes::mask_for_kind(self.model_catalog.as_ref(), kind) {
++            self.set_collaboration_mask_from_user_action(mask);
++        }
++    }
++
+     /// Update the active collaboration mask.
+     ///
+     /// When collaboration modes are enabled and a preset is selected,
+diff --git a/codex-rs/tui/src/chatwidget/tests/permission_shortcuts_tests.rs b/codex-rs/tui/src/chatwidget/tests/permission_shortcuts_tests.rs
+index 76b7eb5..904885f 100644
+--- a/codex-rs/tui/src/chatwidget/tests/permission_shortcuts_tests.rs
++++ b/codex-rs/tui/src/chatwidget/tests/permission_shortcuts_tests.rs
+@@ -2,8 +2,103 @@ use super::permissions::requirements_stack;
+ use super::*;
+ use ApprovalsReviewer::AutoReview;
+ use ApprovalsReviewer::User;
++use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
+ use pretty_assertions::assert_eq;
+
++fn next_permission_selection(
++    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
++) -> (PermissionProfileSelection, Option<ModeKind>) {
++    while let Ok(event) = rx.try_recv() {
++        if let AppEvent::ApplyPermissionShortcut {
++            selection,
++            collaboration_mode,
++            ..
++        } = event
++        {
++            return (selection, collaboration_mode);
++        }
++    }
++    panic!("expected a permission selection");
++}
++
++#[tokio::test]
++async fn shift_tab_cycles_default_plan_full_access_as_session_modes() {
++    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    let thread_id = ThreadId::new();
++    chat.thread_id = Some(thread_id);
++    chat.config.approvals_reviewer = User;
++    chat.config
++        .permissions
++        .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::active(
++            PermissionProfile::workspace_write(),
++            ActivePermissionProfile::new(":workspace"),
++        ))
++        .expect("set default permissions");
++
++    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
++    let (plan, plan_mode) = next_permission_selection(&mut rx);
++    assert_eq!(plan_mode, Some(ModeKind::Plan));
++    assert_eq!(
++        (
++            plan.profile_id.as_str(),
++            plan.approval_policy,
++            plan.display_label.as_str()
++        ),
++        (":read-only", Some(AskForApproval::OnRequest), "Plan")
++    );
++
++    chat.complete_permission_shortcut(thread_id);
++    chat.config
++        .permissions
++        .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::active(
++            PermissionProfile::read_only(),
++            ActivePermissionProfile::new(":read-only"),
++        ))
++        .expect("set plan permissions");
++    chat.set_collaboration_mode_kind_from_user_action(ModeKind::Plan);
++    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
++    let (full_access, full_access_mode) = next_permission_selection(&mut rx);
++    assert_eq!(full_access_mode, Some(ModeKind::Default));
++    assert_eq!(
++        (
++            full_access.profile_id.as_str(),
++            full_access.approval_policy,
++            full_access.display_label.as_str()
++        ),
++        (
++            BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
++            Some(AskForApproval::Never),
++            "Full Access"
++        )
++    );
++
++    chat.complete_permission_shortcut(thread_id);
++    chat.config
++        .permissions
++        .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::active(
++            PermissionProfile::Disabled,
++            ActivePermissionProfile::new(BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS),
++        ))
++        .expect("set full-access permissions");
++    chat.config
++        .permissions
++        .approval_policy
++        .set(AskForApproval::Never.to_core())
++        .expect("set full-access approval policy");
++    chat.set_collaboration_mode_kind_from_user_action(ModeKind::Default);
++    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
++    let (default, default_mode) = next_permission_selection(&mut rx);
++    assert_eq!(default_mode, Some(ModeKind::Default));
++    assert_eq!(
++        (
++            default.profile_id.as_str(),
++            default.approval_policy,
++            default.display_label.as_str()
++        ),
++        (":workspace", Some(AskForApproval::OnRequest), "Default")
++    );
++}
++
+ #[tokio::test]
+ async fn permission_shortcuts_cycle_builtin_modes() {
+     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+@@ -41,6 +136,8 @@ async fn permission_shortcuts_cycle_builtin_modes() {
+         let AppEvent::ApplyPermissionShortcut {
+             thread_id: target,
+             selection,
++            collaboration_mode: None,
++            rollback_collaboration_mode: None,
+         } = rx.try_recv().expect("permission selection")
+         else {
+             panic!("expected one typed permission selection");
+diff --git a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs b/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
+index 3ed5478..134d982 100644
+--- a/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
++++ b/codex-rs/tui/src/chatwidget/tests/plan_mode.rs
+@@ -1338,18 +1338,15 @@ async fn enter_submits_when_plan_stream_is_not_active() {
+ }
+
+ #[tokio::test]
+-async fn collab_mode_shift_tab_cycles_only_when_idle() {
++async fn collab_mode_shift_tab_requires_a_session_and_idle_state() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+     let initial = chat.current_collaboration_mode().clone();
+-    chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
+-    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
+-    assert_eq!(chat.current_collaboration_mode(), &initial);
+-
+     chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
+     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
+     assert_eq!(chat.current_collaboration_mode(), &initial);
+
++    chat.thread_id = Some(ThreadId::new());
+     chat.on_task_started();
+     let before = chat.active_collaboration_mode_kind();
+     chat.handle_key_event(KeyEvent::from(KeyCode::BackTab));
+diff --git a/codex-rs/tui/src/collaboration_modes.rs b/codex-rs/tui/src/collaboration_modes.rs
+index b81f4bf..f721ed9 100644
+--- a/codex-rs/tui/src/collaboration_modes.rs
++++ b/codex-rs/tui/src/collaboration_modes.rs
+@@ -32,23 +32,6 @@ pub(crate) fn mask_for_kind(
+         .find(|mask| mask.mode == Some(kind))
+ }
+
+-/// Cycle to the next collaboration mode preset in list order.
+-pub(crate) fn next_mask(
+-    model_catalog: &ModelCatalog,
+-    current: Option<&CollaborationModeMask>,
+-) -> Option<CollaborationModeMask> {
+-    let presets = filtered_presets(model_catalog);
+-    if presets.is_empty() {
+-        return None;
+-    }
+-    let current_kind = current.and_then(|mask| mask.mode);
+-    let next_index = presets
+-        .iter()
+-        .position(|mask| mask.mode == current_kind)
+-        .map_or(0, |idx| (idx + 1) % presets.len());
+-    presets.get(next_index).cloned()
+-}
+-
+ pub(crate) fn default_mode_mask(model_catalog: &ModelCatalog) -> Option<CollaborationModeMask> {
+     mask_for_kind(model_catalog, ModeKind::Default)
+ }
