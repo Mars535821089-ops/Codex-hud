@@ -1,0 +1,2 @@
+# Git patch context includes significant single-space blank lines.
+extras/unified-modes/patches/*.patch whitespace=-blank-at-eol

@@ -84,6 +84,9 @@ does not imply the interactive patched CLI has upgraded**. `codex --version`
 and `codex --help` are noninteractive official-binary queries and do not
 trigger an expensive Rust rebuild. A clean build and live Shift+Tab check
 remain separate gates before calling a new interactive version current.
+For releases without a reviewed version-matched patch, the manager refuses
+to clone or build upstream and retains the previously accepted custom CLI;
+the generic patch is limited to its original baseline release.
 
 ## Privacy and boundaries
 

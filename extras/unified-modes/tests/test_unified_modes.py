@@ -60,7 +60,7 @@ class UnifiedModesTests(unittest.TestCase):
             self.assertIn("0.154.0", warning)
             self.assertIn("0.153.4", warning)
 
-    def test_versioned_patch_is_selected_before_generic_fallback(self):
+    def test_versioned_patch_is_selected_and_generic_is_baseline_only(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -73,7 +73,23 @@ class UnifiedModesTests(unittest.TestCase):
             with (mock.patch.object(module, "PROJECT_ROOT", root),
                   mock.patch.object(module, "PATCH_FILE", generic)):
                 self.assertEqual(module.patch_file_for("0.167.0"), versioned)
-                self.assertEqual(module.patch_file_for("0.166.0"), generic)
+                self.assertEqual(module.patch_file_for(module.BASELINE_VERSION), generic)
+                with self.assertRaisesRegex(RuntimeError, "reviewed versioned patch"):
+                    module.patch_file_for("0.166.0")
+
+    def test_unknown_release_never_clones_upstream_before_reviewed_patch_exists(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "patches").mkdir()
+            (root / "patches/unified-shift-tab.patch").write_text("historical baseline")
+            with (mock.patch.object(module, "PROJECT_ROOT", root),
+                  mock.patch.object(module, "PATCH_FILE", root / "patches/unified-shift-tab.patch"),
+                  mock.patch.object(module, "run", side_effect=AssertionError(
+                      "unreviewed version must never fetch/patch new upstream"))):
+                with self.assertRaisesRegex(RuntimeError, "reviewed versioned patch"):
+                    module.prepare_source("0.168.0")
+            self.assertFalse((root / "upstream/0.168.0").exists())
 
     def test_zero_selected_native_tests_never_publishes_new_binary(self):
         module = load_module()

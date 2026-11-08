@@ -83,12 +83,17 @@ def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | No
 
 
 def patch_file_for(version: str) -> Path:
-    """Prefer an exact reviewed upstream patch over the generic baseline."""
+    """Fail closed on new releases; never guess that a Rust patch still fits."""
     versioned = PROJECT_ROOT / "patches" / f"unified-shift-tab-{version}.patch"
-    return versioned if versioned.is_file() else PATCH_FILE
+    if versioned.is_file():
+        return versioned
+    if version == BASELINE_VERSION and PATCH_FILE.is_file():
+        return PATCH_FILE
+    raise RuntimeError(f"no reviewed versioned patch for Codex {version}")
 
 
 def prepare_source(version: str) -> Path:
+    patch = patch_file_for(version)
     source = PROJECT_ROOT / "upstream" / version
     if version == BASELINE_VERSION and (source / ".git").is_dir():
         return source
@@ -109,7 +114,7 @@ def prepare_source(version: str) -> Path:
         )
     marker = source / "codex-rs" / "tui" / "src" / "chatwidget" / "permission_shortcuts.rs"
     if "handle_unified_mode_shortcut" not in marker.read_text():
-        run(["git", "apply", "--3way", str(patch_file_for(version))], cwd=source)
+        run(["git", "apply", "--3way", str(patch)], cwd=source)
     return source
 
 
