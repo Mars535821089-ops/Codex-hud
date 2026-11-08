@@ -75,10 +75,15 @@ as Claude Code:
 Default → Plan → Full Access (YOLO) → Default
 ```
 
-The mode manager keeps the official binary untouched, records its fingerprint,
-and re-applies or rejects the patch after an upgrade instead of silently running
-stale code. If a future Codex build is incompatible, it falls back to the
-official executable and reports the failed compatibility gate.
+The mode manager keeps the official binary untouched, selects a patch for
+the exact upstream version when one is available, and requires the named
+three-mode native regression to actually run and pass before accepting a
+newly built CLI. If the upgrade fails, it retains the last accepted custom
+binary and reports the version mismatch; **an installed official npm version
+does not imply the interactive patched CLI has upgraded**. `codex --version`
+and `codex --help` are noninteractive official-binary queries and do not
+trigger an expensive Rust rebuild. A clean build and live Shift+Tab check
+remain separate gates before calling a new interactive version current.
 
 ## Privacy and boundaries
 

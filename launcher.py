@@ -178,7 +178,11 @@ def _launch_hud(real_codex: str, args: list[str]) -> int:
 def main() -> int:
     args = sys.argv[1:]
     try:
-        real_codex = _real_codex()
+        # A read-only version/help query does not need the interactive mode
+        # patch. Avoid a full Rust rebuild during a simple upgrade check.
+        real_codex = (_official_codex()
+                      if args and args[0] in {"--version", "-V", "--help", "-h"}
+                      else _real_codex())
     except FileNotFoundError as error:
         print(f"codex-hud: {error}", file=sys.stderr)
         return 127

@@ -183,6 +183,15 @@ class CodexHudContractTests(unittest.TestCase):
                 self.assertEqual(launcher._real_codex(), str(binary))
             run.assert_called_once()
 
+    def test_noninteractive_version_uses_official_without_building_unified_mode(self):
+        with (mock.patch.object(sys, "argv", ["codex", "--version"]),
+              mock.patch.object(launcher, "_official_codex", return_value="/opt/homebrew/bin/codex"),
+              mock.patch.object(launcher, "_real_codex", side_effect=AssertionError(
+                  "version check must not clone or build a patched runtime")),
+              mock.patch.object(launcher, "_passthrough") as passthrough):
+            launcher.main()
+        passthrough.assert_called_once_with("/opt/homebrew/bin/codex", ["--version"])
+
     def test_empty_tmux_pane_status_means_the_main_pane_is_gone(self):
         self.assertTrue(hud_live.pane_status_is_alive(0, "0\n"))
         self.assertFalse(hud_live.pane_status_is_alive(0, "1\n"))

@@ -20,6 +20,7 @@ PATCH_FILE = PROJECT_ROOT / "patches" / "unified-shift-tab.patch"
 DEFAULT_STATE_ROOT = Path.home() / ".local" / "share" / "codex-unified-modes"
 DEFAULT_OFFICIAL_BINARY = Path("/opt/homebrew/bin/codex")
 BASELINE_VERSION = "0.153.4"
+SHIFT_TAB_TEST_FILTER = "shift_tab_cycles_default_plan_full_access_as_session_modes"
 
 
 def parse_codex_version(output: str) -> str:
@@ -81,6 +82,12 @@ def run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | No
     subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
+def patch_file_for(version: str) -> Path:
+    """Prefer an exact reviewed upstream patch over the generic baseline."""
+    versioned = PROJECT_ROOT / "patches" / f"unified-shift-tab-{version}.patch"
+    return versioned if versioned.is_file() else PATCH_FILE
+
+
 def prepare_source(version: str) -> Path:
     source = PROJECT_ROOT / "upstream" / version
     if version == BASELINE_VERSION and (source / ".git").is_dir():
@@ -102,7 +109,7 @@ def prepare_source(version: str) -> Path:
         )
     marker = source / "codex-rs" / "tui" / "src" / "chatwidget" / "permission_shortcuts.rs"
     if "handle_unified_mode_shortcut" not in marker.read_text():
-        run(["git", "apply", "--3way", str(PATCH_FILE)], cwd=source)
+        run(["git", "apply", "--3way", str(patch_file_for(version))], cwd=source)
     return source
 
 
@@ -119,11 +126,23 @@ def sync_version(version: str, state_root: Path) -> Path:
     rust_root = source / "codex-rs"
     env = os.environ.copy()
     env["RUST_MIN_STACK"] = "16777216"
-    run(
-        ["cargo", "test", "-p", "codex-tui", "unified_mode_shortcut", "--", "--nocapture"],
+    test_result = subprocess.run(
+        ["cargo", "test", "-p", "codex-tui", SHIFT_TAB_TEST_FILTER, "--", "--nocapture"],
         cwd=rust_root,
         env=env,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
+    print(test_result.stdout, end="")
+    if test_result.returncode:
+        raise subprocess.CalledProcessError(
+            test_result.returncode, test_result.args, output=test_result.stdout,
+        )
+    if (f"test chatwidget::tests::permission_shortcuts_tests::{SHIFT_TAB_TEST_FILTER} ... ok"
+            not in test_result.stdout):
+        raise RuntimeError("the unified Shift+Tab regression test did not run")
     run(["cargo", "build", "--release", "-p", "codex-cli", "--bin", "codex"], cwd=rust_root, env=env)
     built = rust_root / "target" / "release" / "codex"
     if binary_version(built) != version:
