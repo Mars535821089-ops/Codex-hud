@@ -113,6 +113,17 @@ class UnifiedModesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("codex-rs/tui/src/chatwidget/permission_shortcuts.rs", result.stdout)
 
+    def test_legacy_0160_patch_is_retained_with_exact_reviewed_bytes(self):
+        import hashlib
+
+        path = MODULE_PATH.parents[1] / "patches/unified-shift-tab-0.160.0.patch"
+        with path.open("rb") as source:
+            self.assertEqual(hashlib.file_digest(source, "sha256").hexdigest(),
+                             "89c423c670d21bf05ffc6e0df45e95da02ea4d4791f3809cc7bd1f90c78c169c")
+        result = subprocess.run(["git", "apply", "--numstat", str(path)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
